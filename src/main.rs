@@ -1,90 +1,137 @@
-use num::{Integer, ToPrimitive, bigint::BigUint};
-use rayon::prelude::*;
+use std::io::{self, Write};
 
-struct Fraction {
-    numerator: BigUint,
-    denominator: BigUint,
-}
+use num::{bigint::BigInt, Integer, ToPrimitive, Zero};
 
-impl Fraction {
-    pub fn new(numerator: BigUint, denominator: BigUint) -> Fraction {
-        Fraction {
-            numerator,
-            denominator,
-        }
+/// k番目の連分数項を返す
+/// e = [2; 1, 2, 1, 1, 4, 1, 1, 6, 1, 1, 8, ...]
+fn cf_term(k: usize) -> u64 {
+    if k == 0 {
+        return 2;
     }
-
-    fn next_digit(&mut self) -> u32 {
-        self.numerator *= BigUint::new(vec![10]);
-        let d = (&self.numerator / &self.denominator).to_u32().unwrap();
-        match d {
-            0 => (),
-            1 => self.numerator -= &self.denominator,
-            _ => self.numerator -= &self.denominator * &BigUint::new(vec![d as _]),
-        }
-        d
+    if k % 3 == 2 {
+        (2 * (k / 3 + 1)) as u64
+    } else {
+        1
     }
 }
 
-fn e_digits(digits: &[u8]) -> String {
-    let mut buf = vec![b' ', b'2', b'.'];
-    for digit in &digits[1..] {
-        buf.push(*digit + b'0');
-        if buf.len() % 61 == 60 {
-            buf.push(b'\n');
-        }
-    }
-    String::from_utf8(buf).unwrap()
+struct EDigits {
+    q: BigInt,
+    r: BigInt,
+    s: BigInt,
+    t: BigInt,
+    k: usize,
 }
 
-fn calc_e(precision: usize) -> String {
-    let mut digits = vec![2, 5];
-    let mut terms = Vec::new();
-    let mut i = BigUint::new(vec![2]);
-    let mut numerator = BigUint::new(vec![10]);
-    let mut denominator = BigUint::new(vec![2]);
-    for _ in 3..10 {
-        i.inc();
-        denominator *= &i;
-        terms.push(Fraction::new(numerator.clone(), denominator.clone()));
+impl EDigits {
+    fn new() -> Self {
+        EDigits {
+            q: BigInt::from(1),
+            r: BigInt::from(0),
+            s: BigInt::from(0),
+            t: BigInt::from(1),
+            k: 0,
+        }
     }
 
-    i.inc();
-    denominator *= &i;
-    let mut next_term = Fraction::new(numerator.clone(), denominator.clone());
-    let mut current_precision_index = 0;
-    for p in 0..precision {
-        eprintln!("{} {}", p, terms.len());
-        let mut digit = terms.par_iter_mut().map(|term| term.next_digit()).sum::<u32>();
-        let d = next_term.next_digit();
-        numerator *= BigUint::new(vec![10]);
-        if d > 0 {
-            digit += d;
-            terms.push(next_term);
-            i.inc();
-            denominator *= &i;
-            next_term = Fraction::new(numerator.clone(), denominator.clone());
+    fn absorb(&mut self) {
+        let a = BigInt::from(cf_term(self.k));
+        self.k += 1;
+        let new_q = &self.q * &a + &self.r;
+        let new_r = self.q.clone();
+        let new_s = &self.s * &a + &self.t;
+        let new_t = self.s.clone();
+        self.q = new_q;
+        self.r = new_r;
+        self.s = new_s;
+        self.t = new_t;
+    }
+
+    fn extract(&self) -> Option<u8> {
+        if self.s.is_zero() || (&self.s + &self.t).is_zero() {
+            return None;
         }
-        digits.push(0);
-        let mut index = digits.len() - 1;
-        while digit > 0 {
-            digits[index] += (digit % 10) as u8;
-            digit /= 10;
-            for j in (1..=index).rev() {
-                if digits[j] >= 10 {
-                    digits[j - 1] += digits[j] / 10;
-                    digits[j] %= 10;
-                } else {
-                    break;
-                }
+        let d1 = (&self.q).div_floor(&self.s);
+        let d2 = (&self.q + &self.r).div_floor(&(&self.s + &self.t));
+        if d1 == d2 {
+            d1.to_u8()
+        } else {
+            None
+        }
+    }
+
+    fn produce(&mut self, d: u8) {
+        let d = BigInt::from(d);
+        let new_q = BigInt::from(10) * &self.q - BigInt::from(10) * &d * &self.s;
+        let new_r = BigInt::from(10) * &self.r - BigInt::from(10) * &d * &self.t;
+        self.q = new_q;
+        self.r = new_r;
+    }
+}
+
+impl Iterator for EDigits {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        loop {
+            if let Some(d) = self.extract() {
+                self.produce(d);
+                return Some(d);
             }
-            index -= 1;
+            self.absorb();
         }
-        current_precision_index = index;
     }
-    e_digits(&digits[..=current_precision_index])
 }
 
 fn main() {
-    println!("{}", calc_e(100000));
+    let no_newline = std::env::args().any(|a| a == "--raw" || a == "-r");
+    let out = io::stdout();
+    let mut writer = io::BufWriter::new(out.lock());
+    let mut col = 0;
+    for digit in EDigits::new() {
+        if write!(writer, "{}", digit).is_err() {
+            return;
+        }
+        if !no_newline {
+            col += 1;
+            if col == 60 {
+                if writeln!(writer).is_err() {
+                    return;
+                }
+                col = 0;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cf_term() {
+        // e = [2; 1, 2, 1, 1, 4, 1, 1, 6, 1, 1, 8, ...]
+        assert_eq!(cf_term(0), 2);
+        assert_eq!(cf_term(1), 1);
+        assert_eq!(cf_term(2), 2);
+        assert_eq!(cf_term(3), 1);
+        assert_eq!(cf_term(4), 1);
+        assert_eq!(cf_term(5), 4);
+        assert_eq!(cf_term(6), 1);
+        assert_eq!(cf_term(7), 1);
+        assert_eq!(cf_term(8), 6);
+        assert_eq!(cf_term(9), 1);
+        assert_eq!(cf_term(10), 1);
+        assert_eq!(cf_term(11), 8);
+    }
+
+    #[test]
+    fn test_first_20_digits() {
+        let digits: Vec<u8> = EDigits::new().take(20).collect();
+        // e = 2.7182818284590452353...
+        assert_eq!(
+            digits,
+            vec![2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9, 0, 4, 5, 2, 3, 5, 3]
+        );
+    }
 }
